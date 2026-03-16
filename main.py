@@ -286,3 +286,193 @@ def compute_basic_stats(G, seed=42):
     print(f"  Avg path length: {s['avg_path_length']:.4f}")
     return s
 
+# fit power-law to degree distribution and save plots
+def degree_distribution(G, output_dir):
+    print("\nAnalyzing degree distribution with powerlaw library...")
+    os.makedirs(output_dir, exist_ok=True)
+    Gc = get_giant_component(G)
+    if Gc.number_of_nodes() == 0:
+        print("  Warning: Giant component is empty")
+        return {}
+    degrees = np.array([d for _, d in Gc.degree()])
+    if len(degrees) == 0:
+        print("  Warning: No degrees available")
+        return {}
+
+    degree_counts = pd.Series(degrees).value_counts().sort_index()
+    degree_df = pd.DataFrame({
+        "degree": degree_counts.index.astype(int),
+        "count": degree_counts.values.astype(int)
+    })
+    csv_path = os.path.join(output_dir, "degree_distribution.csv")
+    degree_df.to_csv(csv_path, index=False)
+    print(f"  Saved: {csv_path}")
+
+    fit = powerlaw.Fit(degrees, discrete=True, verbose=False)
+    alpha = float(fit.power_law.alpha)
+    xmin = int(fit.power_law.xmin)
+    sigma = float(fit.power_law.sigma)
+    n_tail = int(np.sum(degrees >= xmin))
+
+    R_lognormal, p_lognormal = fit.distribution_compare('power_law', 'lognormal')
+    R_exponential, p_exponential = fit.distribution_compare('power_law', 'exponential')
+    R_stretched, p_stretched = fit.distribution_compare('power_law', 'stretched_exponential')
+
+    powerlaw_result = {
+        'alpha': alpha,
+        'xmin': xmin,
+        'sigma': sigma,
+        'n_tail': n_tail,
+        'vs_lognormal': {'R': float(R_lognormal), 'p': float(p_lognormal)},
+        'vs_exponential': {'R': float(R_exponential), 'p': float(p_exponential)},
+        'vs_stretched_exponential': {'R': float(R_stretched), 'p': float(p_stretched)}
+    }
+
+    print(f"  Power-law: alpha={alpha:.3f}, xmin={xmin}, sigma={sigma:.4f}")
+    print(f"  Tail size: {n_tail} nodes")
+    print(f"  vs Lognormal:    R={R_lognormal:+.4f}, p={p_lognormal:.4f}")
+    print(f"  vs Exponential:  R={R_exponential:+.4f}, p={p_exponential:.4f}")
+    print(f"  vs Stretched Exp: R={R_stretched:+.4f}, p={p_stretched:.4f}")
+
+    max_degree = int(degree_df["degree"].max())
+    unique_degrees = np.sort(np.unique(degrees))
+    ccdf = np.array([np.sum(degrees >= k) / len(degrees) for k in unique_degrees])
+
+    # --- PDF with power-law fit ---
+    fig, ax = plt.subplots(figsize=(10, 7))
+    ax.loglog(degree_df["degree"], degree_df["count"], "o",
+              markersize=7, alpha=0.7, color='#2E86AB', markeredgewidth=0.5,
+              markeredgecolor='white', label="Observed")
+    if max_degree >= xmin:
+        k_fit = np.arange(xmin, max_degree + 1)
+        tail_total_count = degree_df[degree_df['degree'] >= xmin]['count'].sum()
+        power_law_line = tail_total_count * (alpha - 1) / xmin * (k_fit / xmin) ** (-alpha)
+        ax.loglog(k_fit, power_law_line, "-", linewidth=3.0, color='#C1121F',
+                  label=f"Power-law fit (α={alpha:.2f}, x_min={xmin})")
+        ax.axvline(xmin, color='#F77F00', linestyle='--', linewidth=2.0,
+                  alpha=0.8, label=f'x_min={xmin}')
+    ax.set_xlabel("Degree (k)", fontsize=13, fontweight='bold')
+    ax.set_ylabel("Count", fontsize=13, fontweight='bold')
+    ax.set_title("Degree Distribution with Power-law Fit", fontsize=15, fontweight='bold', pad=15)
+    ax.legend(fontsize=11, framealpha=0.95, edgecolor='gray', fancybox=True)
+    ax.grid(True, alpha=0.3, which='both', linestyle='--', linewidth=0.8)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    plt.tight_layout()
+    plot_path = os.path.join(output_dir, "degree_distribution_pdf.png")
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  Saved: {plot_path}")
+
+    # --- PDF without fit (raw data only) ---
+    fig, ax = plt.subplots(figsize=(10, 7))
+    ax.loglog(degree_df["degree"], degree_df["count"], "o",
+              markersize=7, alpha=0.7, color='#2E86AB', markeredgewidth=0.5,
+              markeredgecolor='white', label="Observed")
+    ax.set_xlabel("Degree (k)", fontsize=13, fontweight='bold')
+    ax.set_ylabel("Count", fontsize=13, fontweight='bold')
+    ax.set_title("Degree Distribution", fontsize=15, fontweight='bold', pad=15)
+    ax.legend(fontsize=11, framealpha=0.95, edgecolor='gray', fancybox=True)
+    ax.grid(True, alpha=0.3, which='both', linestyle='--', linewidth=0.8)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    plt.tight_layout()
+    plot_path = os.path.join(output_dir, "degree_distribution_pdf_raw.png")
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  Saved: {plot_path}")
+
+    # --- CCDF with power-law fit ---
+    fig, ax = plt.subplots(figsize=(10, 7))
+    ax.loglog(unique_degrees, ccdf, "o", markersize=7, alpha=0.7,
+              color='#2E86AB', markeredgewidth=0.5, markeredgecolor='white',
+              label="Observed CCDF")
+    k_tail = unique_degrees[unique_degrees >= xmin]
+    if len(k_tail) > 0:
+        ccdf_tail = (k_tail / float(xmin)) ** (1 - alpha)
+        scale_idx = np.where(unique_degrees == xmin)[0]
+        scale_factor = ccdf[scale_idx[0]] if len(scale_idx) > 0 else 1.0
+        ccdf_fit = scale_factor * ccdf_tail
+        ax.loglog(k_tail, ccdf_fit, "-", linewidth=3.0, color='#C1121F',
+                  label=f"Power-law fit (α={alpha:.2f})")
+    ax.set_xlabel("Degree (k)", fontsize=13, fontweight='bold')
+    ax.set_ylabel("P(K ≥ k)", fontsize=13, fontweight='bold')
+    ax.set_title("Complementary Cumulative Distribution (CCDF)", fontsize=15, fontweight='bold', pad=15)
+    ax.legend(fontsize=11, framealpha=0.95, edgecolor='gray', fancybox=True)
+    ax.grid(True, alpha=0.3, which='both', linestyle='--', linewidth=0.8)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    plt.tight_layout()
+    plot_path = os.path.join(output_dir, "degree_distribution_ccdf.png")
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  Saved: {plot_path}")
+
+    # --- CCDF without fit (raw data only) ---
+    fig, ax = plt.subplots(figsize=(10, 7))
+    ax.loglog(unique_degrees, ccdf, "o", markersize=7, alpha=0.7,
+              color='#2E86AB', markeredgewidth=0.5, markeredgecolor='white',
+              label="Observed CCDF")
+    ax.set_xlabel("Degree (k)", fontsize=13, fontweight='bold')
+    ax.set_ylabel("P(K ≥ k)", fontsize=13, fontweight='bold')
+    ax.set_title("Complementary Cumulative Distribution (CCDF)", fontsize=15, fontweight='bold', pad=15)
+    ax.legend(fontsize=11, framealpha=0.95, edgecolor='gray', fancybox=True)
+    ax.grid(True, alpha=0.3, which='both', linestyle='--', linewidth=0.8)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    plt.tight_layout()
+    plot_path = os.path.join(output_dir, "degree_distribution_ccdf_raw.png")
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  Saved: {plot_path}")
+
+    return powerlaw_result
+
+
+# plot how clustering changes with node degree
+def clustering_vs_degree(G, output_dir):
+    print("\nAnalyzing clustering vs degree...")
+    Gc = get_giant_component(G)
+    clustering = nx.clustering(Gc)
+    degrees = dict(Gc.degree())
+    data = []
+    for node in Gc.nodes():
+        data.append({
+            'degree': degrees[node],
+            'clustering': clustering[node]
+        })
+    df = pd.DataFrame(data)
+    df_binned = df[df['degree'] > 0].copy()
+    if len(df_binned) == 0:
+        print("  Warning: No valid data for clustering vs degree")
+        return
+    min_deg = df_binned['degree'].min()
+    max_deg = df_binned['degree'].max()
+    if max_deg > min_deg:
+        bins = np.logspace(np.log10(min_deg), np.log10(max_deg), CLUSTERING_DEGREE_BINS)
+        df_binned['degree_bin'] = pd.cut(df_binned['degree'], bins=bins, include_lowest=True)
+        grouped = df_binned.groupby('degree_bin', observed=True).agg({
+            'degree': 'mean',
+            'clustering': 'mean'
+        }).dropna()
+        fig, ax = plt.subplots(figsize=(10, 7))
+        ax.loglog(df['degree'], df['clustering'], 'o', alpha=0.15,
+                  markersize=4, color='lightblue', label='Individual nodes')
+        ax.loglog(grouped['degree'], grouped['clustering'], 'o-',
+                  markersize=10, linewidth=2.5, color='#003049',
+                  markeredgewidth=1.5, markeredgecolor='white',
+                  label='Binned average')
+        ax.set_xlabel('Degree (k)', fontsize=13, fontweight='bold')
+        ax.set_ylabel('Clustering Coefficient C(k)', fontsize=13, fontweight='bold')
+        ax.set_title('Clustering Coefficient vs Degree', fontsize=15, fontweight='bold', pad=15)
+        ax.legend(fontsize=11, framealpha=0.95, edgecolor='gray', fancybox=True)
+        ax.grid(True, alpha=0.3, which='both', linestyle='--', linewidth=0.8)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        plt.tight_layout()
+        plot_path = os.path.join(output_dir, 'clustering_vs_degree.png')
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight', facecolor='white')
+        plt.close()
+        print(f"  Saved: {plot_path}")
+    else:
+        print("  Warning: Insufficient degree range for clustering analysis")
