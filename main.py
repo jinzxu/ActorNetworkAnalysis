@@ -223,3 +223,66 @@ def save_network_files(G, output_dir):
         print(f"  Saved: {nodes_fname} ({labeled_count} nodes with labels, degree >= {threshold})")
         print(f"  Saved: {edges_fname} ({len(edges_df)} edges, full network)")
 
+# get the biggest connected part of the graph
+def get_giant_component(G):
+    if G.number_of_nodes() == 0:
+        return G
+    components = list(nx.connected_components(G))
+    if len(components) == 0:
+        return G
+    largest = max(components, key=len)
+    return G.subgraph(largest).copy()
+
+
+# estimate average shortest path by sampling some nodes
+def estimate_path_length(G, sample_size, seed):
+    nodes = list(G.nodes())
+    k = min(sample_size, len(nodes))
+    rng = random.Random(seed)
+    sampled_nodes = rng.sample(nodes, k)
+    total_distance = 0
+    total_pairs = 0
+    for node in sampled_nodes:
+        lengths = nx.single_source_shortest_path_length(G, node)
+        for target, dist in lengths.items():
+            if target != node:
+                total_distance += dist
+                total_pairs += 1
+    return float(total_distance / total_pairs) if total_pairs > 0 else 0.0
+
+
+# compute basic graph stats like degree, clustering, path length
+def compute_basic_stats(G, seed=42):
+    print("\nComputing basic statistics...")
+    s = {}
+    s['num_nodes'] = int(G.number_of_nodes())
+    s['num_edges'] = int(G.number_of_edges())
+    s['num_components'] = int(nx.number_connected_components(G))
+    Gc = get_giant_component(G)
+    s['giant_component_size'] = int(Gc.number_of_nodes())
+    degrees = [d for n, d in Gc.degree()]
+    s['avg_degree'] = float(np.mean(degrees))
+    s['max_degree'] = int(np.max(degrees))
+    s['min_degree'] = int(np.min(degrees))
+    s['median_degree'] = float(np.median(degrees))
+    print("Computing clustering coefficient...")
+    s['clustering_coefficient'] = float(nx.transitivity(Gc))
+    s['avg_clustering'] = float(nx.average_clustering(Gc))
+    print("Computing degree assortativity...")
+    s['degree_assortativity'] = float(nx.degree_assortativity_coefficient(Gc))
+    print(f"Estimating average path length (sampling {PATH_SAMPLE_SIZE} nodes)...")
+    s['avg_path_length'] = estimate_path_length(Gc, PATH_SAMPLE_SIZE, seed)
+    if Gc.number_of_nodes() < 1000:
+        print("Computing diameter...")
+        s['diameter'] = int(nx.diameter(Gc))
+    else:
+        print("Network too large, skipping diameter computation")
+        s['diameter'] = None
+    print(f"  Nodes: {s['num_nodes']}")
+    print(f"  Edges: {s['num_edges']}")
+    print(f"  Avg degree: {s['avg_degree']:.2f}")
+    print(f"  Clustering: {s['clustering_coefficient']:.4f}")
+    print(f"  Assortativity: {s['degree_assortativity']:.4f}")
+    print(f"  Avg path length: {s['avg_path_length']:.4f}")
+    return s
+
