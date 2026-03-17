@@ -476,3 +476,166 @@ def clustering_vs_degree(G, output_dir):
         print(f"  Saved: {plot_path}")
     else:
         print("  Warning: Insufficient degree range for clustering analysis")
+
+
+# make one random graph by shuffling edges (keep same degrees)
+def generate_single_null(Gc, seed):
+    H = Gc.copy()
+    m = H.number_of_edges()
+    nswap = max(1, int(SWAPS_PER_EDGE_MULTIPLIER * m))
+    max_tries = nswap * MAX_TRIES_MULTIPLIER
+    try:
+        nx.double_edge_swap(H, nswap=nswap, max_tries=max_tries, seed=seed)
+        return H
+    except nx.NetworkXAlgorithmError:
+        try:
+            nx.double_edge_swap(H, nswap=nswap // 2, max_tries=max_tries, seed=seed + 999999)
+            return H
+        except:
+            return None
+
+
+# build many random graphs and record their stats as a baseline
+def create_null_model(G, seed=42):
+    print(f"\nCreating null model ensemble ({NULL_MODEL_ITERATIONS} independent networks)...")
+    Gc = get_giant_component(G)
+
+    null_clustering = []
+    null_path_length = []
+    successful_iterations = 0
+    failed_iterations = 0
+    start_time = time.time()
+
+    for i in range(NULL_MODEL_ITERATIONS):
+        H = generate_single_null(Gc, seed + i)
+        if H is None:
+            failed_iterations += 1
+            continue
+
+        successful_iterations += 1
+        clustering = nx.transitivity(H)
+        null_clustering.append(clustering)
+        path_len = estimate_path_length(H, NULL_MODEL_SAMPLE_SIZE, seed + 1000000 + i)
+        null_path_length.append(path_len)
+
+        if (i + 1) % PROGRESS_INTERVAL == 0 or i == 0:
+            elapsed = time.time() - start_time
+            avg_time = elapsed / (i + 1)
+            eta = avg_time * (NULL_MODEL_ITERATIONS - i - 1)
+            success_rate = successful_iterations / (i + 1) * 100
+            print(f"  [{i+1:4d}/{NULL_MODEL_ITERATIONS}] Success: {success_rate:5.1f}% | "
+                  f"Time: {avg_time:5.2f}s/iter | ETA: {eta:6.1f}s")
+        if (i + 1) % PROGRESS_DETAIL_INTERVAL == 0 and len(null_clustering) > 0:
+            current_c = np.mean(null_clustering)
+            current_l = np.mean(null_path_length) if len(null_path_length) > 0 else 0
+            print(f"       Current: C={current_c:.4f}, L={current_l:.4f}")
+
+    total_time = time.time() - start_time
+    success_rate = successful_iterations / NULL_MODEL_ITERATIONS
+    print(f"\n  Complete: {total_time:.1f}s ({total_time/60:.2f}min)")
+    print(f"  Success: {successful_iterations}/{NULL_MODEL_ITERATIONS} ({success_rate*100:.1f}%)")
+
+    if len(null_clustering) == 0:
+        raise ValueError("Null model failed completely")
+
+    null_stats = {
+        'clustering_mean': float(np.mean(null_clustering)),
+        'clustering_std': float(np.std(null_clustering)),
+        'clustering_min': float(np.min(null_clustering)),
+        'clustering_max': float(np.max(null_clustering)),
+        'clustering_samples': null_clustering,
+        'path_length_mean': float(np.mean(null_path_length)),
+        'path_length_std': float(np.std(null_path_length)),
+        'path_length_min': float(np.min(null_path_length)),
+        'path_length_max': float(np.max(null_path_length)),
+        'path_length_samples': null_path_length,
+        'successful_iterations': int(successful_iterations),
+        'failed_iterations': int(failed_iterations),
+        'success_rate': float(success_rate)
+    }
+    print(f"  Null C: {null_stats['clustering_mean']:.4f} +/- {null_stats['clustering_std']:.4f}")
+    print(f"  Null L: {null_stats['path_length_mean']:.4f} +/- {null_stats['path_length_std']:.4f}")
+    return null_stats
+
+
+# compare real network to random baseline, compute small-world sigma
+def compare_to_null(real_stats, null_stats):
+    print("\nComparing to null model...")
+    comparison = {}
+    real_c = real_stats['clustering_coefficient']
+    null_c_mean = null_stats['clustering_mean']
+    null_c_std = null_stats['clustering_std']
+    real_l = real_stats['avg_path_length']
+    null_l_mean = null_stats['path_length_mean']
+    null_l_std = null_stats['path_length_std']
+    comparison['real_clustering'] = float(real_c)
+    comparison['null_clustering_mean'] = float(null_c_mean)
+    comparison['null_clustering_std'] = float(null_c_std)
+    comparison['clustering_z_score'] = float((real_c - null_c_mean) / null_c_std) if null_c_std > 0 else None
+    comparison['real_path_length'] = float(real_l)
+    comparison['null_path_length_mean'] = float(null_l_mean)
+    comparison['null_path_length_std'] = float(null_l_std)
+    comparison['path_length_z_score'] = float((real_l - null_l_mean) / null_l_std) if null_l_std > 0 else None
+    if real_c > 0 and null_c_mean > 0 and real_l > 0 and null_l_mean > 0:
+        gamma = real_c / null_c_mean
+        lam = real_l / null_l_mean
+        comparison['gamma'] = float(gamma)
+        comparison['lambda'] = float(lam)
+        comparison['small_world_coefficient'] = float(gamma / lam)
+        print(f"  gamma (C_real/C_null): {gamma:.3f}")
+        print(f"  lambda (L_real/L_null): {lam:.3f}")
+        print(f"  Small-world sigma: {comparison['small_world_coefficient']:.3f}")
+        if comparison['small_world_coefficient'] > 1:
+            print("  -> Small-world properties detected (sigma > 1)")
+    else:
+        comparison['small_world_coefficient'] = None
+    if comparison['clustering_z_score'] is not None:
+        print(f"  Clustering z-score: {comparison['clustering_z_score']:.2f}")
+    if comparison['path_length_z_score'] is not None:
+        print(f"  Path length z-score: {comparison['path_length_z_score']:.2f}")
+    return comparison
+
+
+# plot real vs null model stats side by side
+def plot_null_comparison(real_stats, null_stats, output_dir):
+    print("\nCreating null model comparison plot...")
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    real_c = real_stats['clustering_coefficient']
+    null_c_samples = null_stats['clustering_samples']
+    bp1 = ax1.boxplot([null_c_samples], positions=[1], widths=0.5, patch_artist=True,
+                       boxprops=dict(facecolor='#A8DADC', edgecolor='#003049', linewidth=1.5),
+                       medianprops=dict(color='#C1121F', linewidth=2.5),
+                       whiskerprops=dict(color='#003049', linewidth=1.5),
+                       capprops=dict(color='#003049', linewidth=1.5))
+    ax1.plot(1, real_c, 'o', markersize=12, color='#C1121F',
+            markeredgewidth=2, markeredgecolor='white', label='Observed')
+    ax1.set_xticks([1])
+    ax1.set_xticklabels(['Null Model'], fontsize=11, fontweight='bold')
+    ax1.set_ylabel('Clustering Coefficient', fontsize=13, fontweight='bold')
+    ax1.set_title('Clustering: Real vs Null', fontsize=14, fontweight='bold', pad=12)
+    ax1.legend(fontsize=10, framealpha=0.95, edgecolor='gray')
+    ax1.grid(True, alpha=0.3, axis='y', linestyle='--')
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
+    real_l = real_stats['avg_path_length']
+    null_l_samples = null_stats['path_length_samples']
+    bp2 = ax2.boxplot([null_l_samples], positions=[1], widths=0.5, patch_artist=True,
+                       boxprops=dict(facecolor='#A8DADC', edgecolor='#003049', linewidth=1.5),
+                       medianprops=dict(color='#C1121F', linewidth=2.5),
+                       whiskerprops=dict(color='#003049', linewidth=1.5),
+                       capprops=dict(color='#003049', linewidth=1.5))
+    ax2.plot(1, real_l, 'o', markersize=12, color='#C1121F',
+            markeredgewidth=2, markeredgecolor='white', label='Observed')
+    ax2.set_xticks([1])
+    ax2.set_xticklabels(['Null Model'], fontsize=11, fontweight='bold')
+    ax2.set_ylabel('Average Path Length', fontsize=13, fontweight='bold')
+    ax2.set_title('Path Length: Real vs Null', fontsize=14, fontweight='bold', pad=12)
+    ax2.legend(fontsize=10, framealpha=0.95, edgecolor='gray')
+    ax2.grid(True, alpha=0.3, axis='y', linestyle='--')
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    plt.tight_layout()
+    plot_path = os.path.join(output_dir, 'null_comparison.png')
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  Saved: {plot_path}")
