@@ -639,3 +639,333 @@ def plot_null_comparison(real_stats, null_stats, output_dir):
     plt.savefig(plot_path, dpi=300, bbox_inches='tight', facecolor='white')
     plt.close()
     print(f"  Saved: {plot_path}")
+
+
+# compute degree, betweenness, eigenvector centrality for each actor
+def centrality_analysis(G, output_dir, seed=42):
+    print("\nComputing centrality...")
+    Gc = get_giant_component(G)
+    degree_cent = dict(Gc.degree())
+    sample_size = min(BETWEENNESS_SAMPLE_SIZE, Gc.number_of_nodes())
+    print(f"  Betweenness (sampling {sample_size} nodes)...")
+    nodes = list(Gc.nodes())
+    random.seed(seed)
+    sampled_nodes = random.sample(nodes, sample_size)
+    betweenness_cent = nx.betweenness_centrality_subset(Gc, sources=sampled_nodes,
+                                                         targets=nodes, normalized=True)
+    print("  Eigenvector (weighted)...")
+    try:
+        eigenvector_cent = nx.eigenvector_centrality(Gc, max_iter=1000, weight='weight')
+    except:
+        eigenvector_cent = {n: 0 for n in Gc.nodes()}
+    cent_df = pd.DataFrame({
+        'node': list(Gc.nodes()),
+        'degree': [degree_cent[n] for n in Gc.nodes()],
+        'betweenness': [betweenness_cent.get(n, 0) for n in Gc.nodes()],
+        'eigenvector': [eigenvector_cent.get(n, 0) for n in Gc.nodes()]
+    })
+    cent_df = cent_df.sort_values('degree', ascending=False)
+    cent_df.to_csv(os.path.join(output_dir, 'centrality.csv'), index=False)
+    print("  Top 5:")
+    top_5 = []
+    for idx, row in cent_df.head(5).iterrows():
+        print(f"    {len(top_5)+1}. {row['node']}: deg={int(row['degree'])}, "
+              f"btw={row['betweenness']:.4f}, eig={row['eigenvector']:.4f}")
+        top_5.append({
+            'node': str(row['node']),
+            'degree': int(row['degree']),
+            'betweenness': float(row['betweenness']),
+            'eigenvector': float(row['eigenvector'])
+        })
+    return top_5
+
+
+# collect each actor's movie count, scores, votes, genres, career years
+def actor_success_features(df, output_dir, seed=42):
+    print("\nComputing actor success features...")
+    random.seed(seed)
+    np.random.seed(seed)
+    actor_cols = [c for c in ["actor_1_name", "actor_2_name", "actor_3_name"]
+                  if c in df.columns]
+    s = {}
+    for i, row in df.iterrows():
+        actors = set()
+        for c in actor_cols:
+            v = norm_str(row.get(c, None))
+            if v:
+                actors.add(v)
+        if not actors:
+            continue
+        score = row.get("imdb_score", np.nan)
+        votes = row.get("num_voted_users", np.nan)
+        year = row.get("title_year", np.nan)
+        genres = row.get("genres_list", [])
+        for a in actors:
+            if a not in s:
+                s[a] = {
+                    "n_movies": 0,
+                    "imdb_sum": 0.0, "imdb_cnt": 0, "imdb_max": -1e9,
+                    "votes_sum": 0.0, "votes_cnt": 0, "votes_max": -1e9,
+                    "genres": set(),
+                    "ymin": 1e9, "ymax": -1e9
+                }
+            r = s[a]
+            r["n_movies"] += 1
+            if pd.notna(score):
+                r["imdb_sum"] += float(score)
+                r["imdb_cnt"] += 1
+                r["imdb_max"] = max(r["imdb_max"], float(score))
+            if pd.notna(votes):
+                r["votes_sum"] += float(votes)
+                r["votes_cnt"] += 1
+                r["votes_max"] = max(r["votes_max"], float(votes))
+            if pd.notna(year):
+                y = float(year)
+                r["ymin"] = min(r["ymin"], y)
+                r["ymax"] = max(r["ymax"], y)
+            for g in genres:
+                g2 = norm_str(g)
+                if g2:
+                    r["genres"].add(g2)
+    actors = list(s.keys())
+    out = pd.DataFrame({
+        "actor": actors,
+        "n_movies": [s[a]["n_movies"] for a in actors],
+        "imdb_mean": [
+            s[a]["imdb_sum"] / s[a]["imdb_cnt"] if s[a]["imdb_cnt"] > 0 else np.nan
+            for a in actors
+        ],
+        "imdb_max": [
+            s[a]["imdb_max"] if s[a]["imdb_max"] > -1e8 else np.nan
+            for a in actors
+        ],
+        "votes_mean": [
+            s[a]["votes_sum"] / s[a]["votes_cnt"] if s[a]["votes_cnt"] > 0 else np.nan
+            for a in actors
+        ],
+        "votes_max": [
+            s[a]["votes_max"] if s[a]["votes_max"] > -1e8 else np.nan
+            for a in actors
+        ],
+        "genre_span": [len(s[a]["genres"]) for a in actors],
+        "career_span_years": [
+            s[a]["ymax"] - s[a]["ymin"] if (s[a]["ymin"] < 1e8 and s[a]["ymax"] > -1e8)
+            else np.nan for a in actors
+        ]
+    })
+    path = os.path.join(output_dir, "actor_success_features.csv")
+    out.to_csv(path, index=False)
+    print(f"  Saved: {path}")
+    return out
+
+
+# join network stats with actor success data and make scatter plots
+def merge_success(G, success_df, centrality_csv_path, output_dir):
+    print("\nMerging network position with success features...")
+    Gc = get_giant_component(G)
+    deg = dict(Gc.degree())
+    strength = dict(Gc.degree(weight="weight"))
+    df_net = pd.DataFrame({
+        "actor": list(Gc.nodes()),
+        "degree": [deg.get(a, 0) for a in Gc.nodes()],
+        "strength": [strength.get(a, 0.0) for a in Gc.nodes()]
+    })
+    merged = df_net.merge(success_df, on="actor", how="left")
+
+    # Load centrality data and merge betweenness and eigenvector
+    cent_df = pd.read_csv(centrality_csv_path)
+    cent_df = cent_df.rename(columns={'node': 'actor'})
+    merged = merged.merge(cent_df[['actor', 'betweenness', 'eigenvector']],
+                          on='actor', how='left')
+
+    path = os.path.join(output_dir, "network_success_merged.csv")
+    merged.to_csv(path, index=False)
+    print(f"  Saved: {path}")
+
+    # Plot 1: Degree vs IMDb Score
+    fig, ax = plt.subplots(figsize=(10, 7))
+    x = merged["degree"].to_numpy(dtype=float)
+    y = merged["imdb_mean"].to_numpy(dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    ax.scatter(x[mask], y[mask], s=12, alpha=0.5, color='#2E86AB',
+              edgecolors='white', linewidths=0.3)
+    ax.set_xlabel("Actor Degree (number of collaborations)", fontsize=13, fontweight='bold')
+    ax.set_ylabel("Mean IMDb Score", fontsize=13, fontweight='bold')
+    ax.set_title("Network Position vs Success", fontsize=15, fontweight='bold', pad=15)
+    ax.grid(True, alpha=0.3, linestyle='--')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    if np.sum(mask) > 10:
+        corr, pval = stats.pearsonr(x[mask], y[mask])
+        ax.text(0.05, 0.95, f'Pearson r = {corr:.3f}\np-value = {pval:.2e}',
+                transform=ax.transAxes, fontsize=11, fontweight='bold',
+                bbox=dict(boxstyle='round', facecolor='#FFF3B0', alpha=0.9, edgecolor='gray'),
+                verticalalignment='top')
+    fig_path = os.path.join(output_dir, "degree_vs_imdb_score.png")
+    plt.tight_layout()
+    plt.savefig(fig_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  Saved: {fig_path}")
+
+    # Plot 2: Betweenness Centrality vs IMDb Score
+    fig, ax = plt.subplots(figsize=(10, 7))
+    x = merged["betweenness"].to_numpy(dtype=float)
+    y = merged["imdb_mean"].to_numpy(dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    ax.scatter(x[mask], y[mask], s=12, alpha=0.5, color='#E76F51',
+              edgecolors='white', linewidths=0.3)
+    ax.set_xlabel("Betweenness Centrality", fontsize=13, fontweight='bold')
+    ax.set_ylabel("Mean IMDb Score", fontsize=13, fontweight='bold')
+    ax.set_title("Betweenness Centrality vs Success", fontsize=15, fontweight='bold', pad=15)
+    ax.grid(True, alpha=0.3, linestyle='--')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    if np.sum(mask) > 10:
+        corr, pval = stats.pearsonr(x[mask], y[mask])
+        ax.text(0.05, 0.95, f'Pearson r = {corr:.3f}\np-value = {pval:.2e}',
+                transform=ax.transAxes, fontsize=11, fontweight='bold',
+                bbox=dict(boxstyle='round', facecolor='#FFF3B0', alpha=0.9, edgecolor='gray'),
+                verticalalignment='top')
+    fig_path = os.path.join(output_dir, "betweenness_vs_imdb_score.png")
+    plt.tight_layout()
+    plt.savefig(fig_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  Saved: {fig_path}")
+
+    # Plot 3: Eigenvector Centrality vs IMDb Score
+    fig, ax = plt.subplots(figsize=(10, 7))
+    x = merged["eigenvector"].to_numpy(dtype=float)
+    y = merged["imdb_mean"].to_numpy(dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    ax.scatter(x[mask], y[mask], s=12, alpha=0.5, color='#2A9D8F',
+              edgecolors='white', linewidths=0.3)
+    ax.set_xlabel("Eigenvector Centrality (weighted)", fontsize=13, fontweight='bold')
+    ax.set_ylabel("Mean IMDb Score", fontsize=13, fontweight='bold')
+    ax.set_title("Eigenvector Centrality vs Success", fontsize=15, fontweight='bold', pad=15)
+    ax.grid(True, alpha=0.3, linestyle='--')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    if np.sum(mask) > 10:
+        corr, pval = stats.pearsonr(x[mask], y[mask])
+        ax.text(0.05, 0.95, f'Pearson r = {corr:.3f}\np-value = {pval:.2e}',
+                transform=ax.transAxes, fontsize=11, fontweight='bold',
+                bbox=dict(boxstyle='round', facecolor='#FFF3B0', alpha=0.9, edgecolor='gray'),
+                verticalalignment='top')
+    fig_path = os.path.join(output_dir, "eigenvector_vs_imdb_score.png")
+    plt.tight_layout()
+    plt.savefig(fig_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  Saved: {fig_path}")
+
+    # Plot 4: Genre Diversity vs Network Position
+    fig, ax = plt.subplots(figsize=(10, 7))
+    x = merged["genre_span"].to_numpy(dtype=float)
+    y = merged["degree"].to_numpy(dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    ax.scatter(x[mask], y[mask], s=12, alpha=0.5, color='#A23B72',
+              edgecolors='white', linewidths=0.3)
+    ax.set_xlabel("Genre Span (number of unique genres)", fontsize=13, fontweight='bold')
+    ax.set_ylabel("Actor Degree", fontsize=13, fontweight='bold')
+    ax.set_title("Genre Diversity vs Network Position", fontsize=15, fontweight='bold', pad=15)
+    ax.grid(True, alpha=0.3, linestyle='--')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    if np.sum(mask) > 10:
+        corr, pval = stats.pearsonr(x[mask], y[mask])
+        ax.text(0.05, 0.95, f'Pearson r = {corr:.3f}\np-value = {pval:.2e}',
+                transform=ax.transAxes, fontsize=11, fontweight='bold',
+                bbox=dict(boxstyle='round', facecolor='#FFF3B0', alpha=0.9, edgecolor='gray'),
+                verticalalignment='top')
+    fig_path = os.path.join(output_dir, "genre_span_vs_degree.png")
+    plt.tight_layout()
+    plt.savefig(fig_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  Saved: {fig_path}")
+
+
+# main entry point: run all steps and save results
+def main():
+    parser = argparse.ArgumentParser(description='Actor Network Analysis')
+    parser.add_argument('--input', type=str, default='movie_metadata.csv')
+    parser.add_argument('--output', type=str, default='output')
+    parser.add_argument('--seed', type=int, default=42)
+    args = parser.parse_args()
+
+    print("="*70)
+    print("ACTOR COLLABORATION NETWORK ANALYSIS")
+    print("="*70)
+
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    os.makedirs(args.output, exist_ok=True)
+    start_time = time.time()
+
+    df = read_data(args.input)
+    df = clean_data(df)
+    G = build_network(df, args.output, seed=args.seed)
+    basic_stats = compute_basic_stats(G, seed=args.seed)
+    powerlaw_fit = degree_distribution(G, args.output)
+    clustering_vs_degree(G, args.output)
+    null_stats = create_null_model(G, seed=args.seed)
+    null_comparison = compare_to_null(basic_stats, null_stats)
+    plot_null_comparison(basic_stats, null_stats, args.output)
+    top_central = centrality_analysis(G, args.output, seed=args.seed)
+    success_features = actor_success_features(df, args.output, seed=args.seed)
+    centrality_csv_path = os.path.join(args.output, 'centrality.csv')
+    merge_success(G, success_features, centrality_csv_path, args.output)
+
+    null_stats_clean = {k: v for k, v in null_stats.items()
+                        if k not in ['clustering_samples', 'path_length_samples']}
+
+    results = {
+        'methodology': 'Clustering: unweighted topology. Weights: eigenvector centrality. Null model: independent degree-preserving randomization ensemble. Community detection: performed in Gephi using Louvain algorithm.',
+        'basic_statistics': basic_stats,
+        'powerlaw_fit': powerlaw_fit,
+        'null_model': null_stats_clean,
+        'null_comparison': null_comparison,
+        'top_5_central': top_central
+    }
+    with open(os.path.join(args.output, 'results.json'), 'w') as f:
+        json.dump(results, f, indent=2)
+
+    total_time = time.time() - start_time
+    print("\n" + "="*70)
+    print("ANALYSIS COMPLETE")
+    print("="*70)
+    print(f"Time: {total_time:.1f}s ({total_time/60:.2f}min)")
+    print(f"\nKey Findings:")
+    print(f"  Nodes: {basic_stats['num_nodes']:,}")
+    print(f"  Edges: {basic_stats['num_edges']:,}")
+    print(f"  Avg degree: {basic_stats['avg_degree']:.2f}")
+    print(f"  Clustering: {basic_stats['clustering_coefficient']:.4f}")
+    print(f"  Assortativity: {basic_stats['degree_assortativity']:.3f}")
+    if powerlaw_fit.get('alpha'):
+        print(f"  Power-law alpha: {powerlaw_fit['alpha']:.3f} (xmin={powerlaw_fit['xmin']})")
+        if powerlaw_fit['vs_lognormal']['p'] < 0.05:
+            winner = "power_law" if powerlaw_fit['vs_lognormal']['R'] > 0 else "lognormal"
+            print(f"  Distribution comparison: {winner} preferred (p={powerlaw_fit['vs_lognormal']['p']:.4f})")
+        else:
+            print(f"  Distribution comparison: inconclusive (p={powerlaw_fit['vs_lognormal']['p']:.4f})")
+    if null_comparison.get('small_world_coefficient'):
+        print(f"  Small-world sigma: {null_comparison['small_world_coefficient']:.3f}")
+    print(f"  Null success rate: {null_stats['success_rate']*100:.1f}%")
+    print(f"\n=== OUTPUT FILES ===")
+    print(f"Saved to: {args.output}/")
+    print("  gephi_nodes.csv & gephi_edges.csv (full network for Gephi)")
+    for t in LABEL_DEGREE_THRESHOLDS:
+        print(f"  gephi_nodes_degree{t}_labels.csv & gephi_edges_degree{t}_labels.csv (labels for degree >= {t})")
+    print("  degree_distribution_pdf.png & ccdf.png (with power-law fit)")
+    print("  degree_distribution_pdf_raw.png & ccdf_raw.png (without fit)")
+    print("  clustering_vs_degree.png")
+    print("  null_comparison.png")
+    print("  degree_vs_imdb_score.png")
+    print("  betweenness_vs_imdb_score.png")
+    print("  eigenvector_vs_imdb_score.png")
+    print("  genre_span_vs_degree.png")
+    print("  centrality.csv")
+    print("  All CSV and JSON files")
+    print("="*70)
+
+
+if __name__ == '__main__':
+    main()
