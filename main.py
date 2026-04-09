@@ -299,62 +299,89 @@ def degree_distribution(G, output_dir):
         print("  Warning: No degrees available")
         return {}
 
+    # ── Raw degree counts (for CSV) ───────────────────────────────────────────
     degree_counts = pd.Series(degrees).value_counts().sort_index()
     degree_df = pd.DataFrame({
         "degree": degree_counts.index.astype(int),
-        "count": degree_counts.values.astype(int)
+        "count":  degree_counts.values.astype(int)
     })
     csv_path = os.path.join(output_dir, "degree_distribution.csv")
     degree_df.to_csv(csv_path, index=False)
     print(f"  Saved: {csv_path}")
 
+    # ── Powerlaw fit (MLE) ────────────────────────────────────────────────────
     fit = powerlaw.Fit(degrees, discrete=True, verbose=False)
     alpha = float(fit.power_law.alpha)
-    xmin = int(fit.power_law.xmin)
+    xmin  = int(fit.power_law.xmin)
     sigma = float(fit.power_law.sigma)
     n_tail = int(np.sum(degrees >= xmin))
 
-    R_lognormal, p_lognormal = fit.distribution_compare('power_law', 'lognormal')
+    R_lognormal,   p_lognormal   = fit.distribution_compare('power_law', 'lognormal')
     R_exponential, p_exponential = fit.distribution_compare('power_law', 'exponential')
-    R_stretched, p_stretched = fit.distribution_compare('power_law', 'stretched_exponential')
+    R_stretched,   p_stretched   = fit.distribution_compare('power_law', 'stretched_exponential')
 
     powerlaw_result = {
-        'alpha': alpha,
-        'xmin': xmin,
-        'sigma': sigma,
-        'n_tail': n_tail,
-        'vs_lognormal': {'R': float(R_lognormal), 'p': float(p_lognormal)},
-        'vs_exponential': {'R': float(R_exponential), 'p': float(p_exponential)},
-        'vs_stretched_exponential': {'R': float(R_stretched), 'p': float(p_stretched)}
+        'alpha': alpha, 'xmin': xmin, 'sigma': sigma, 'n_tail': n_tail,
+        'vs_lognormal':             {'R': float(R_lognormal),   'p': float(p_lognormal)},
+        'vs_exponential':           {'R': float(R_exponential), 'p': float(p_exponential)},
+        'vs_stretched_exponential': {'R': float(R_stretched),   'p': float(p_stretched)}
     }
 
     print(f"  Power-law: alpha={alpha:.3f}, xmin={xmin}, sigma={sigma:.4f}")
     print(f"  Tail size: {n_tail} nodes")
-    print(f"  vs Lognormal:    R={R_lognormal:+.4f}, p={p_lognormal:.4f}")
-    print(f"  vs Exponential:  R={R_exponential:+.4f}, p={p_exponential:.4f}")
+    print(f"  vs Lognormal:     R={R_lognormal:+.4f}, p={p_lognormal:.4f}")
+    print(f"  vs Exponential:   R={R_exponential:+.4f}, p={p_exponential:.4f}")
     print(f"  vs Stretched Exp: R={R_stretched:+.4f}, p={p_stretched:.4f}")
 
-    max_degree = int(degree_df["degree"].max())
+    # ── Logarithmic binning helper ────────────────────────────────────────────
+    def logbin_degrees(degrees_arr, n_bins=30):
+        d_min = max(1, int(degrees_arr.min()))
+        d_max = int(degrees_arr.max())
+        if d_max <= d_min:
+            return np.array([d_min], dtype=float), np.array([1.0])
+        bin_edges = np.unique(
+            np.round(np.logspace(np.log10(d_min), np.log10(d_max), n_bins + 1))
+        ).astype(int)
+        bin_edges = np.unique(np.clip(bin_edges, d_min, d_max))
+        centres, densities = [], []
+        for lo, hi in zip(bin_edges[:-1], bin_edges[1:]):
+            width = hi - lo if hi - lo > 0 else 1
+            count = np.sum((degrees_arr >= lo) & (degrees_arr < hi))
+            if count > 0:
+                centres.append(np.sqrt(lo * hi))          # geometric mean
+                densities.append(count / (len(degrees_arr) * width))
+        return np.array(centres), np.array(densities)
+
+    bin_centres, bin_density = logbin_degrees(degrees)
+
+    max_degree     = int(degree_df["degree"].max())
     unique_degrees = np.sort(np.unique(degrees))
     ccdf = np.array([np.sum(degrees >= k) / len(degrees) for k in unique_degrees])
 
-    # --- PDF with power-law fit ---
+    # ── Plot 1: Log-binned PDF + power-law fit line ───────────────────────────
     fig, ax = plt.subplots(figsize=(10, 7))
-    ax.loglog(degree_df["degree"], degree_df["count"], "o",
-              markersize=7, alpha=0.7, color='#2E86AB', markeredgewidth=0.5,
-              markeredgecolor='white', label="Observed")
+    ax.loglog(bin_centres, bin_density, 'o', markersize=8, alpha=0.85,
+              color='#2E86AB', markeredgewidth=0.8, markeredgecolor='white',
+              label="Log-binned data", zorder=3)
     if max_degree >= xmin:
-        k_fit = np.arange(xmin, max_degree + 1)
-        tail_total_count = degree_df[degree_df['degree'] >= xmin]['count'].sum()
-        power_law_line = tail_total_count * (alpha - 1) / xmin * (k_fit / xmin) ** (-alpha)
-        ax.loglog(k_fit, power_law_line, "-", linewidth=3.0, color='#C1121F',
-                  label=f"Power-law fit (α={alpha:.2f}, x_min={xmin})")
-        ax.axvline(xmin, color='#F77F00', linestyle='--', linewidth=2.0,
-                  alpha=0.8, label=f'x_min={xmin}')
+        k_fit      = np.logspace(np.log10(xmin), np.log10(max_degree), 200)
+        pl_density = (alpha - 1) / xmin * (k_fit / xmin) ** (-alpha)
+        # scale to match binned data at xmin
+        scale_mask = bin_centres >= xmin
+        if scale_mask.sum() > 0:
+            ref_k      = bin_centres[scale_mask][0]
+            ref_y      = bin_density[scale_mask][0]
+            scale      = ref_y / ((alpha - 1) / xmin * (ref_k / xmin) ** (-alpha))
+            pl_density *= scale
+        ax.loglog(k_fit, pl_density, '-', linewidth=2.5, color='#C1121F',
+                  label=f"Power-law fit (α = {alpha:.2f}, x_min = {xmin})", zorder=2)
+        ax.axvline(xmin, color='#F77F00', linestyle='--', linewidth=1.8,
+                   alpha=0.8, label=f'x_min = {xmin}')
     ax.set_xlabel("Degree (k)", fontsize=13, fontweight='bold')
-    ax.set_ylabel("Count", fontsize=13, fontweight='bold')
-    ax.set_title("Degree Distribution with Power-law Fit", fontsize=15, fontweight='bold', pad=15)
-    ax.legend(fontsize=11, framealpha=0.95, edgecolor='gray', fancybox=True)
+    ax.set_ylabel("Probability Density p(k)", fontsize=13, fontweight='bold')
+    ax.set_title("Degree Distribution with Log Binning & Power-law Fit",
+                 fontsize=14, fontweight='bold', pad=15)
+    ax.legend(fontsize=10, framealpha=0.95, edgecolor='gray', fancybox=True)
     ax.grid(True, alpha=0.3, which='both', linestyle='--', linewidth=0.8)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -364,14 +391,14 @@ def degree_distribution(G, output_dir):
     plt.close()
     print(f"  Saved: {plot_path}")
 
-    # --- PDF without fit (raw data only) ---
+    # ── Plot 2: Log-binned PDF, raw (no fit lines) ────────────────────────────
     fig, ax = plt.subplots(figsize=(10, 7))
-    ax.loglog(degree_df["degree"], degree_df["count"], "o",
-              markersize=7, alpha=0.7, color='#2E86AB', markeredgewidth=0.5,
-              markeredgecolor='white', label="Observed")
+    ax.loglog(bin_centres, bin_density, 'o', markersize=8, alpha=0.85,
+              color='#2E86AB', markeredgewidth=0.8, markeredgecolor='white',
+              label="Log-binned data")
     ax.set_xlabel("Degree (k)", fontsize=13, fontweight='bold')
-    ax.set_ylabel("Count", fontsize=13, fontweight='bold')
-    ax.set_title("Degree Distribution", fontsize=15, fontweight='bold', pad=15)
+    ax.set_ylabel("Probability Density p(k)", fontsize=13, fontweight='bold')
+    ax.set_title("Degree Distribution (Log Binning)", fontsize=15, fontweight='bold', pad=15)
     ax.legend(fontsize=11, framealpha=0.95, edgecolor='gray', fancybox=True)
     ax.grid(True, alpha=0.3, which='both', linestyle='--', linewidth=0.8)
     ax.spines['top'].set_visible(False)
@@ -382,22 +409,23 @@ def degree_distribution(G, output_dir):
     plt.close()
     print(f"  Saved: {plot_path}")
 
-    # --- CCDF with power-law fit ---
+    # ── Plot 3: CCDF with power-law fit ──────────────────────────────────────
     fig, ax = plt.subplots(figsize=(10, 7))
     ax.loglog(unique_degrees, ccdf, "o", markersize=7, alpha=0.7,
               color='#2E86AB', markeredgewidth=0.5, markeredgecolor='white',
               label="Observed CCDF")
     k_tail = unique_degrees[unique_degrees >= xmin]
     if len(k_tail) > 0:
-        ccdf_tail = (k_tail / float(xmin)) ** (1 - alpha)
-        scale_idx = np.where(unique_degrees == xmin)[0]
+        ccdf_tail    = (k_tail / float(xmin)) ** (1 - alpha)
+        scale_idx    = np.where(unique_degrees == xmin)[0]
         scale_factor = ccdf[scale_idx[0]] if len(scale_idx) > 0 else 1.0
-        ccdf_fit = scale_factor * ccdf_tail
+        ccdf_fit     = scale_factor * ccdf_tail
         ax.loglog(k_tail, ccdf_fit, "-", linewidth=3.0, color='#C1121F',
-                  label=f"Power-law fit (α={alpha:.2f})")
+                  label=f"Power-law fit (α = {alpha:.2f})")
     ax.set_xlabel("Degree (k)", fontsize=13, fontweight='bold')
     ax.set_ylabel("P(K ≥ k)", fontsize=13, fontweight='bold')
-    ax.set_title("Complementary Cumulative Distribution (CCDF)", fontsize=15, fontweight='bold', pad=15)
+    ax.set_title("Complementary Cumulative Distribution (CCDF)",
+                 fontsize=15, fontweight='bold', pad=15)
     ax.legend(fontsize=11, framealpha=0.95, edgecolor='gray', fancybox=True)
     ax.grid(True, alpha=0.3, which='both', linestyle='--', linewidth=0.8)
     ax.spines['top'].set_visible(False)
@@ -408,14 +436,15 @@ def degree_distribution(G, output_dir):
     plt.close()
     print(f"  Saved: {plot_path}")
 
-    # --- CCDF without fit (raw data only) ---
+    # ── Plot 4: CCDF raw (no fit) ─────────────────────────────────────────────
     fig, ax = plt.subplots(figsize=(10, 7))
     ax.loglog(unique_degrees, ccdf, "o", markersize=7, alpha=0.7,
               color='#2E86AB', markeredgewidth=0.5, markeredgecolor='white',
               label="Observed CCDF")
     ax.set_xlabel("Degree (k)", fontsize=13, fontweight='bold')
     ax.set_ylabel("P(K ≥ k)", fontsize=13, fontweight='bold')
-    ax.set_title("Complementary Cumulative Distribution (CCDF)", fontsize=15, fontweight='bold', pad=15)
+    ax.set_title("Complementary Cumulative Distribution (CCDF)",
+                 fontsize=15, fontweight='bold', pad=15)
     ax.legend(fontsize=11, framealpha=0.95, edgecolor='gray', fancybox=True)
     ax.grid(True, alpha=0.3, which='both', linestyle='--', linewidth=0.8)
     ax.spines['top'].set_visible(False)
