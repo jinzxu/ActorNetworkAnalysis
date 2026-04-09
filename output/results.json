@@ -1,0 +1,94 @@
+{
+  "methodology": "Clustering: unweighted topology. Weights: eigenvector centrality. Null model: independent degree-preserving randomization ensemble. Community detection: performed in Gephi using Louvain algorithm.",
+  "basic_statistics": {
+    "num_nodes": 6255,
+    "num_edges": 14337,
+    "num_components": 517,
+    "giant_component_size": 4627,
+    "avg_degree": 5.4769829263021395,
+    "max_degree": 94,
+    "min_degree": 1,
+    "median_degree": 2.0,
+    "clustering_coefficient": 0.08963789805075058,
+    "avg_clustering": 0.6217235359004817,
+    "degree_assortativity": 0.17524082510709166,
+    "avg_path_length": 4.783015564202334,
+    "diameter": null
+  },
+  "powerlaw_fit": {
+    "alpha": 2.8751857477866363,
+    "xmin": 10,
+    "sigma": 0.07217593308434428,
+    "n_tail": 675,
+    "vs_lognormal": {
+      "R": -5.721214662978204,
+      "p": 0.023639197452174743
+    },
+    "vs_exponential": {
+      "R": 24.27476663899209,
+      "p": 0.01856766765305099
+    },
+    "vs_stretched_exponential": {
+      "R": -6.601017579163537,
+      "p": 0.018384884659186116
+    }
+  },
+  "null_model": {
+    "clustering_mean": 0.0071584849511969525,
+    "clustering_std": 0.00041892626057990506,
+    "clustering_min": 0.0059287515726702935,
+    "clustering_max": 0.008617371471904497,
+    "path_length_mean": 4.321044971452962,
+    "path_length_std": 0.032761234262935264,
+    "path_length_min": 4.224330955469088,
+    "path_length_max": 4.416593169044531,
+    "successful_iterations": 1000,
+    "failed_iterations": 0,
+    "success_rate": 1.0
+  },
+  "null_comparison": {
+    "real_clustering": 0.08963789805075058,
+    "null_clustering_mean": 0.0071584849511969525,
+    "null_clustering_std": 0.00041892626057990506,
+    "clustering_z_score": 196.88289052440933,
+    "real_path_length": 4.783015564202334,
+    "null_path_length_mean": 4.321044971452962,
+    "null_path_length_std": 0.032761234262935264,
+    "path_length_z_score": 14.101135172188158,
+    "gamma": 12.521909127679656,
+    "lambda": 1.1069117761563203,
+    "small_world_coefficient": 11.312472590328
+  },
+  "top_5_central": [
+    {
+      "node": "Robert De Niro",
+      "degree": 94,
+      "betweenness": 0.005916050692441935,
+      "eigenvector": 0.2021658375566198
+    },
+    {
+      "node": "Morgan Freeman",
+      "degree": 79,
+      "betweenness": 0.004897659368506506,
+      "eigenvector": 0.20812626632303716
+    },
+    {
+      "node": "Matt Damon",
+      "degree": 72,
+      "betweenness": 0.003649801689957862,
+      "eigenvector": 0.10940529040217574
+    },
+    {
+      "node": "Bruce Willis",
+      "degree": 70,
+      "betweenness": 0.003816574042096693,
+      "eigenvector": 0.13510721452750055
+    },
+    {
+      "node": "Nicolas Cage",
+      "degree": 62,
+      "betweenness": 0.0036868894908878794,
+      "eigenvector": 0.0723647749653424
+    }
+  ]
+}
